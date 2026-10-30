@@ -66,8 +66,8 @@ import { failureStreak } from './lib/perceive'
 import { RARITY_LABEL, SPECIES, SPECIES_IDS, advanceDay, clampName, createFallbackSoul, createPet, isAwaitingName, nameOf, nextStage, rarityOf, restoreLost, rollSpecies, upgradePet } from './lib/pet'
 import * as persona from './lib/persona'
 import { DAILY_AI_CALLS, OFFER_FALLBACK, RESERVED_AI_CALLS, REACTION_FALLBACK, fallbackLine } from './lib/persona'
-import { FESTIVAL_LINE, FRIEND_TTL_MS, NO_BONKS, PLAZA_POLL_MS, ROOM_ACT_LABEL, STREAM_RETRY_MAX_MS, STREAM_STEADY_MS, eventText, isForMe, lookSprite, parseRoom, parseSnapshot, plazaEndpoint, plazaStreamUrl, roomPicture, shouldDismissVisitor, splitEvents, visitorOf, wireColor } from './lib/plaza'
-import type { PlazaAction, PlazaBonks, PlazaEvent, PlazaHome, PlazaSnapshot, PlazaStatus, PlazaWeather, RoomAct } from './lib/plaza'
+import { FESTIVAL_LINE, FRIEND_TTL_MS, NO_BONKS, PLAZA_POLL_MS, ROOM_ACT_LABEL, STREAM_RETRY_MAX_MS, STREAM_STEADY_MS, eventText, isForMe, lookSprite, parseChannelReply, parseRoom, parseSnapshot, plazaEndpoint, plazaStreamUrl, roomPicture, shouldDismissVisitor, splitEvents, visitorOf, wireColor } from './lib/plaza'
+import type { PlazaAction, PlazaBonks, PlazaChannel, PlazaChannelInfo, PlazaEvent, PlazaHome, PlazaSnapshot, PlazaStatus, PlazaWeather, RoomAct } from './lib/plaza'
 import type { Random } from './lib/random'
 import { createRandom, hashText, pick, pickWeighted } from './lib/random'
 import type { Look, RoomView, Scene, Step } from './lib/scene'
@@ -249,6 +249,10 @@ export type Brain = {
   friends: readonly TokoFriend[]
   plazaBonks: PlazaBonks
   plazaWeather: PlazaWeather | null
+  plazaChannel: number | null
+  plazaChannels: readonly PlazaChannel[]
+  plazaChannelSize: number | null
+  joiningChannel: number | null
   feed: readonly { at: number; text: string }[]
   lastPollAt: number
   plazaStream: 'off' | 'connecting' | 'live' | 'unsupported'
@@ -351,6 +355,10 @@ export const createBrain = (seed: number, serverUrl: string): Brain => ({
   friends: [],
   plazaBonks: NO_BONKS,
   plazaWeather: null,
+  plazaChannel: null,
+  plazaChannels: [],
+  plazaChannelSize: null,
+  joiningChannel: null,
   feed: [],
   lastPollAt: 0,
   plazaStream: 'off',
@@ -2512,16 +2520,22 @@ export async function pollPlaza($: $, brain: Brain): Promise<void> {
 }
 
 async function takeSnapshot($: $, brain: Brain, snapshot: PlazaSnapshot): Promise<void> {
+  const isFirstHere = brain.joiningChannel !== null && snapshot.channel === brain.joiningChannel
   brain.friends = snapshot.friends
   brain.plazaBonks = snapshot.bonks
+  keepChannels(brain, snapshot)
   const before = brain.plazaWeather
   brain.plazaWeather = snapshot.weather
   if (snapshot.weather?.level === 'festival' && before !== null && before.level !== 'festival' && !isHushed(brain)) {
     await say($, brain, FESTIVAL_LINE, 'quiet')
   }
   const fresh = snapshot.events.filter(event => !brain.seenEvents.includes(event.id) && isForMe(event, brain.plazaId))
+  const heard = isFirstHere ? fresh.filter(event => event.to !== null) : fresh
+  if (isFirstHere) {
+    brain.joiningChannel = null
+  }
   brain.seenEvents = [...brain.seenEvents, ...fresh.map(event => event.id)].slice(-200)
-  for (const event of fresh) {
+  for (const event of heard) {
     await receivePlaza($, brain, event)
   }
   if (snapshot.home !== null) {
@@ -2529,6 +2543,12 @@ async function takeSnapshot($: $, brain: Brain, snapshot: PlazaSnapshot): Promis
     await takeGifts($, brain, snapshot.home.gifts)
   }
   await update($, plazaAtom, () => plazaViewOf(brain, true))
+}
+
+const keepChannels = (brain: Brain, info: PlazaChannelInfo): void => {
+  brain.plazaChannel = info.channel
+  brain.plazaChannels = info.channels
+  brain.plazaChannelSize = info.channelSize
 }
 
 const plazaViewOf = (brain: Brain, isOnline: boolean) => ({ isOnline, friends: brain.friends, feed: brain.feed, guests: brain.guests, away: brain.away })
@@ -2987,9 +3007,11 @@ async function receiveRoom($: $, brain: Brain, event: PlazaEvent): Promise<void>
   }
 }
 
+export const plazaOffText = (brain: Brain): string => (brain.serverUrl.length === 0 ? '광장 서버 주소가 설정되지 않았어요.' : '광장이 꺼져 있어요. /toko plaza on')
+
 async function postPlaza($: $, brain: Brain, path: string, body: Record<string, unknown>): Promise<{ status: number; text: string } | string> {
   if (!isPlazaReady(brain)) {
-    return brain.serverUrl.length === 0 ? '광장 서버 주소가 설정되지 않았어요.' : '광장이 꺼져 있어요. /toko plaza on'
+    return plazaOffText(brain)
   }
   const url = plazaEndpoint(brain.serverUrl, path)
   if (url === null) {
@@ -3001,6 +3023,29 @@ async function postPlaza($: $, brain: Brain, path: string, body: Record<string, 
   } catch {
     return '광장 서버에 닿지 못했어요.'
   }
+}
+
+const CHANNEL_REFUSED: Readonly<Record<number, string>> = { 400: '없는 채널 번호예요. 지금 있는 채널이나, 그다음 빈 번호만 쓸 수 있어요.' }
+
+export async function moveChannel($: $, brain: Brain, channel: number): Promise<string> {
+  const result = await postPlaza($, brain, '/v1/channel', { channel })
+  if (typeof result === 'string') {
+    return result
+  }
+  if (result.status === 409) {
+    return `${channel}번 채널은 가득 찼어요.`
+  }
+  const info = result.status === 200 ? parseChannelReply(result.text) : null
+  if (info === null) {
+    return CHANNEL_REFUSED[result.status] ?? `광장 서버가 거절했어요 (${result.status}).`
+  }
+  keepChannels(brain, info)
+  brain.joiningChannel = info.channel
+  brain.friends = []
+  brain.lastPlazaReport = ''
+  brain.lastPollAt = 0
+  await update($, plazaAtom, () => plazaViewOf(brain, true))
+  return `${info.channel}번 채널로 옮겼어요.`
 }
 
 const VISIT_REFUSED: Readonly<Record<number, string>> = { 403: '그 방은 지금 손님을 받지 않아요.', 409: '그 방은 손님이 꽉 찼어요.', 404: '그 방문은 이미 끝났어요.' }
@@ -3244,6 +3289,8 @@ export const guestLook = (guest: Pick<TokoGuest, 'id' | 'species' | 'wear'>): Lo
   ...guest.wear,
 })
 
+const ACT_REFUSED: Readonly<Record<number, string>> = { 404: '그 친구는 지금 내 채널에 없어요. 다른 채널에 있거나 광장을 나갔어요.' }
+
 export async function sendPlaza($: $, brain: Brain, kind: PlazaAction, to: string | null): Promise<string> {
   if (!isPlazaReady(brain)) {
     return brain.serverUrl.length === 0 ? '광장 서버 주소가 설정되지 않았어요. /plugin 설정에서 serverUrl을 넣어 주세요.' : '광장이 꺼져 있어요. /toko plaza on'
@@ -3255,7 +3302,7 @@ export async function sendPlaza($: $, brain: Brain, kind: PlazaAction, to: strin
   try {
     const response = await $.http.fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ me: plazaMe(brain), kind, to }) })
     if (!response.ok) {
-      return `광장 서버가 거절했어요 (${response.status}).`
+      return ACT_REFUSED[response.status] ?? `광장 서버가 거절했어요 (${response.status}).`
     }
     remember(brain, 'plaza-sent', kind)
     if (kind !== 'stretch-call') {

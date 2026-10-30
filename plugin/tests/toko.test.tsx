@@ -662,6 +662,81 @@ test('the plaza polls the server and a friend’s wave reaches the pet', { optio
   expect(sent.text).toContain('보냈어요')
 })
 
+test('/toko plaza shows my channel, lists the channels, and moves me when the server allows it', { options: { serverUrl: 'http://plaza.test' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: START })
+  engine(on, { 'toko:pet': PET, 'toko:plaza-id': 'me' })
+  const moves: unknown[] = []
+  let channel = 2
+  const channels = [{ channel: 1, count: 20 }, { channel: 2, count: 7 }]
+  on('http.fetch', (_, e) => {
+    if (e.url === 'http://plaza.test/v1/channel') {
+      const wanted = JSON.parse(e.init?.body ?? '{}').channel
+      moves.push(wanted)
+      if (wanted === 1) {
+        return { value: { status: 409, ok: false, headers: {}, text: JSON.stringify({ error: 'that channel is full' }) } }
+      }
+      if (wanted === 9) {
+        return { value: { status: 400, ok: false, headers: {}, text: JSON.stringify({ error: 'bad request' }) } }
+      }
+      channel = wanted
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ok: true, channel, channels, channelSize: 20 }) } }
+    }
+    if (e.url === 'http://plaza.test/v1/act') {
+      return { value: { status: 404, ok: false, headers: {}, text: JSON.stringify({ error: 'that friend is not in your channel' }) } }
+    }
+    const friends = [{ id: 'f1', name: '콩떡', color: 'peach', species: 'fox', mood: 'calm', status: 'working', lastSeen: START }]
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ now: START, friends, events: [], channel, channels, channelSize: 20 }) } }
+  })
+  await begin($)
+  await clock.advance(25_000)
+  const run = async (args: string): Promise<string> => (await $.command.run({ command: 'toko', args } as never)).text
+  expect((await run('plaza')).split('\n')[0]).toBe('광장: 켜짐 · 2번 채널 · 친구 1명')
+  expect((await run('plaza channel')).split('\n')).toEqual(['1번 20/20 (가득)', '2번 7/20 (내 채널)', '/toko plaza channel <번호>로 채널을 옮겨요. 다음 빈 번호(3)를 쓰면 새 채널이 열려요.'])
+  expect(await run('plaza heart 콩떡')).toBe('그 친구는 지금 내 채널에 없어요. 다른 채널에 있거나 광장을 나갔어요.')
+  expect(await run('plaza channel 1')).toBe('1번 채널은 가득 찼어요.')
+  expect(await run('plaza channel 9')).toContain('없는 채널 번호예요')
+  expect(await run('plaza channel abc')).toContain('1 이상의 정수')
+  expect(await run('plaza channel 0')).toContain('1 이상의 정수')
+  expect(moves).toEqual([1, 9])
+  expect(await run('plaza channel 3')).toBe('3번 채널로 옮겼어요.')
+  expect((await run('plaza')).split('\n')[0]).toBe('광장: 켜짐 · 3번 채널 · 친구 0명')
+})
+
+test('after moving channel, old cheers already in the new channel are not news, but a wave sent to me still is', { options: { serverUrl: 'http://plaza.test' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: START })
+  engine(on, { 'toko:pet': PET, 'toko:plaza-id': 'me' })
+  let channel = 2
+  const channels = [{ channel: 1, count: 20 }, { channel: 2, count: 1 }]
+  const cheer = { id: 'old-cheer', at: START, kind: 'cheer', from: { id: 'f2', name: '옛응원', color: 'mint' }, to: null, line: '힘내' }
+  const wave = { id: 'my-wave', at: START, kind: 'wave', from: { id: 'f3', name: '바로손짓', color: 'peach' }, to: 'me', line: '안녕' }
+  on('http.fetch', (_, e) => {
+    if (e.url === 'http://plaza.test/v1/channel') {
+      channel = 3
+      return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ ok: true, channel, channels, channelSize: 20 }) } }
+    }
+    const events = channel === 3 ? [cheer, wave] : []
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ now: START, friends: [], events, channel, channels, channelSize: 20 }) } }
+  })
+  await begin($)
+  await clock.advance(25_000)
+  expect((await $.command.run({ command: 'toko', args: 'plaza channel 3' } as never)).text).toBe('3번 채널로 옮겼어요.')
+  await clock.advance(25_000)
+  const room = await $.ui.mount({ plugin: 'toko', component: 'Pane', requestId: 'toko-room', surface: 'terminal', props: { title: '말랑의 방', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} } } as never)
+  expect(await room.find({ type: 'Text', text: /바로손짓/ })).toBeDefined()
+  expect(await room.find({ type: 'Text', text: /옛응원/ })).toBeUndefined()
+  await room.unmount()
+})
+
+test('an old server that sends no channel leaves the channel unknown and the plaza command unchanged', { options: { serverUrl: 'http://plaza.test' } }, async ($, on) => {
+  const clock = mock.clock(on, { now: START })
+  engine(on, { 'toko:pet': PET, 'toko:plaza-id': 'me' })
+  on('http.fetch', () => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ now: START, friends: [], events: [] }) } }))
+  await begin($)
+  await clock.advance(25_000)
+  expect((await $.command.run({ command: 'toko', args: 'plaza' } as never)).text).toBe('광장: 켜짐 · 친구 0명')
+  expect((await $.command.run({ command: 'toko', args: 'plaza channel' } as never)).text).toBe('채널 정보를 아직 받지 못했어요. 잠시 뒤에 다시 해 보세요.')
+})
+
 test('a /bonk tells the plaza only what kind of mistake it was, and /toko plaza shows the day’s board', { options: { serverUrl: 'http://plaza.test' } }, async ($, on) => {
   const clock = mock.clock(on, { now: START })
   engine(on, { 'toko:pet': PET, 'toko:plaza-id': 'me' }, 'test-dodge')

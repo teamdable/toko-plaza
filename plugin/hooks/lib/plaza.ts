@@ -134,7 +134,21 @@ export type PlazaGift = { id: string; item: string; from: string }
 
 export type PlazaHome = { guests: readonly TokoGuest[]; away: TokoAway | null; stickers: readonly string[]; gifts: readonly PlazaGift[] }
 
-export type PlazaSnapshot = { friends: readonly TokoFriend[]; events: readonly PlazaEvent[]; bonks: PlazaBonks; weather: PlazaWeather | null; now: number; home: PlazaHome | null }
+export type PlazaChannel = { channel: number; count: number }
+
+export const DEFAULT_CHANNEL_SIZE = 20
+
+export type PlazaSnapshot = {
+  friends: readonly TokoFriend[]
+  events: readonly PlazaEvent[]
+  bonks: PlazaBonks
+  weather: PlazaWeather | null
+  now: number
+  home: PlazaHome | null
+  channel: number | null
+  channels: readonly PlazaChannel[]
+  channelSize: number | null
+}
 
 const COLORS: ReadonlySet<string> = new Set(['honey', 'mint', 'peach', 'lavender'])
 const MOODS: ReadonlySet<string> = new Set(['excited', 'calm', 'sleepy', 'worried', 'sulky'])
@@ -277,6 +291,49 @@ const parseHome = (raw: Record<string, unknown>): PlazaHome | null =>
       }
     : null
 
+const channelNumber = (value: unknown): number | null => (typeof value === 'number' && Number.isInteger(value) && value >= 1 ? value : null)
+
+const parsePlazaChannel = (value: unknown): PlazaChannel | null => {
+  const raw = asRecord(value)
+  const channel = channelNumber(raw?.channel)
+  const count = raw?.count
+  return channel !== null && typeof count === 'number' && Number.isInteger(count) && count >= 0 ? { channel, count } : null
+}
+
+export const parseChannels = (value: unknown): readonly PlazaChannel[] =>
+  (Array.isArray(value) ? value : [])
+    .map(parsePlazaChannel)
+    .filter(isPresent)
+    .sort((a, b) => a.channel - b.channel)
+    .slice(0, 200)
+
+export type PlazaChannelInfo = { channel: number | null; channels: readonly PlazaChannel[]; channelSize: number | null }
+
+export const parseChannelInfo = (raw: Record<string, unknown>): PlazaChannelInfo => ({ channel: channelNumber(raw.channel), channels: parseChannels(raw.channels), channelSize: channelNumber(raw.channelSize) })
+
+export const parseChannelReply = (body: string): PlazaChannelInfo | null => {
+  try {
+    const raw = asRecord(JSON.parse(body))
+    const info = raw === null ? null : parseChannelInfo(raw)
+    return info !== null && info.channel !== null ? info : null
+  } catch {
+    return null
+  }
+}
+
+export const channelsText = (channel: number | null, channels: readonly PlazaChannel[], channelSize: number | null): string | null => {
+  if (channels.length === 0) {
+    return null
+  }
+  const size = channelSize ?? DEFAULT_CHANNEL_SIZE
+  const lines = channels.map(entry => {
+    const marks = [...(entry.count >= size ? ['가득'] : []), ...(entry.channel === channel ? ['내 채널'] : [])]
+    return `${entry.channel}번 ${entry.count}/${size}${marks.length === 0 ? '' : ` (${marks.join(', ')})`}`
+  })
+  const next = Math.max(...channels.map(entry => entry.channel)) + 1
+  return [...lines, `/toko plaza channel <번호>로 채널을 옮겨요. 다음 빈 번호(${next})를 쓰면 새 채널이 열려요.`].join('\n')
+}
+
 export const parseSnapshot = (body: string, myId: string): PlazaSnapshot | null => {
   try {
     const raw = asRecord(JSON.parse(body))
@@ -285,7 +342,7 @@ export const parseSnapshot = (body: string, myId: string): PlazaSnapshot | null 
     }
     const friends = (Array.isArray(raw.friends) ? raw.friends : []).map(parseFriend).filter(isPresent).filter(friend => friend.id !== myId)
     const events = (Array.isArray(raw.events) ? raw.events : []).map(parseEvent).filter(isPresent).filter(event => event.from.id !== myId)
-    return { friends: friends.slice(0, 30), events: events.slice(-20), bonks: parseBonks(raw.bonks), weather: parseWeather(raw.weather), now: typeof raw.now === 'number' ? raw.now : 0, home: parseHome(raw) }
+    return { friends: friends.slice(0, 30), events: events.slice(-20), bonks: parseBonks(raw.bonks), weather: parseWeather(raw.weather), now: typeof raw.now === 'number' ? raw.now : 0, home: parseHome(raw), ...parseChannelInfo(raw) }
   } catch {
     return null
   }

@@ -8,7 +8,7 @@ import { MAX_LINE, OFFER_FALLBACK, REACTION_FALLBACK, SPECIES_VOICE, bonkMessage
 import { freshSignal, lastAiTitle, parseSendWords, sendTarget, signalLabel, signalParts, transcriptExcerpt } from '../hooks/lib/peers'
 import { SPECIES, SPECIES_IDS, clampName, createFallbackSoul, nextStage, rollSpecies } from '../hooks/lib/pet'
 import { BONK_KINDS, guessKind, kindPrompt, parseKind } from '../hooks/lib/bonks'
-import { bonkBoardText, lookSprite, parseSnapshot, plazaEndpoint, spriteOf, wearOf, weatherText } from '../hooks/lib/plaza'
+import { bonkBoardText, channelsText, lookSprite, parseChannelReply, parseSnapshot, plazaEndpoint, spriteOf, wearOf, weatherText } from '../hooks/lib/plaza'
 import type { Canvas } from '../hooks/lib/raster'
 import { createRandom } from '../hooks/lib/random'
 import { DEFAULT, createCanvas, decodeGlyphs, encodeCells, setPixel, toBase64 } from '../hooks/lib/raster'
@@ -569,6 +569,24 @@ test('the plaza’s bonk board keeps only known kinds and reads as one line', as
   expect(bonkBoardText(bonks ?? { total: 0, top: [] })).toBe('뿅망치 전광판: 오늘 Clawd가 9번 맞았어요 · 1위 안 돌려 보고 됐다고 함(5번), 2위 말이 너무 김(1번)')
   expect(parseSnapshot(JSON.stringify({ now: 1, friends: [], events: [] }), 'me')?.bonks).toEqual({ total: 0, top: [] })
   expect(bonkBoardText({ total: 0, top: [] })).toBe(null)
+})
+
+test('the plaza’s channel fields are read when valid and left unknown when missing or malformed', async () => {
+  const body = JSON.stringify({ now: 5, friends: [], events: [], channel: 3, channels: [{ channel: 3, count: 7 }, { channel: 1, count: 20 }, { channel: 0, count: 2 }, { channel: 2.5, count: 1 }, { channel: 2, count: -1 }, { channel: '4', count: 1 }, null], channelSize: 20 })
+  expect(parseSnapshot(body, 'me')).toMatchObject({ channel: 3, channels: [{ channel: 1, count: 20 }, { channel: 3, count: 7 }], channelSize: 20 })
+  expect(parseSnapshot(JSON.stringify({ now: 1, friends: [], events: [] }), 'me')).toMatchObject({ channel: null, channels: [], channelSize: null })
+  expect(parseSnapshot(JSON.stringify({ now: 1, friends: [], events: [], channel: 'x', channels: 'x', channelSize: 0 }), 'me')).toMatchObject({ channel: null, channels: [], channelSize: null })
+  expect(parseSnapshot(JSON.stringify({ now: 1, friends: [], events: [], channel: 1.5, channelSize: -3 }), 'me')).toMatchObject({ channel: null, channelSize: null })
+  expect(parseChannelReply(JSON.stringify({ ok: true, channel: 2, channels: [{ channel: 1, count: 20 }, { channel: 2, count: 1 }], channelSize: 20 }))).toEqual({ channel: 2, channels: [{ channel: 1, count: 20 }, { channel: 2, count: 1 }], channelSize: 20 })
+  expect(parseChannelReply(JSON.stringify({ ok: true }))).toBe(null)
+  expect(parseChannelReply('not json')).toBe(null)
+})
+
+test('the channel list marks full channels and mine, and points at the next empty number', async () => {
+  const channels = [{ channel: 1, count: 20 }, { channel: 2, count: 7 }]
+  expect(channelsText(2, channels, 20)?.split('\n')).toEqual(['1번 20/20 (가득)', '2번 7/20 (내 채널)', '/toko plaza channel <번호>로 채널을 옮겨요. 다음 빈 번호(3)를 쓰면 새 채널이 열려요.'])
+  expect(channelsText(1, channels, null)?.split('\n')[0]).toBe('1번 20/20 (가득, 내 채널)')
+  expect(channelsText(null, [], null)).toBe(null)
 })
 
 test('the plaza’s Claude weather keeps only known levels and reads as one line', async () => {

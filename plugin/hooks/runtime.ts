@@ -2,7 +2,7 @@ import type { CommandRunResult, EngineInterface } from 'claude-code'
 
 import type { TokoChoice, TokoPet, TokoSettings } from '../types'
 
-import { FOCUS_MINUTES, answerOffer, apologize, askName, balance, giveName, catchInGame, chatted, checkInit, comeHome, createBrain, cycleRoom, demoBoss, demoCoins, demoSouvenir, doingOf, dyeItem, exchangeForStars, giftToFriend, noteDoing, sendSticker, drawPet, ensureScene, feed, fillMemo, forgetMemo, forgetSignal, greet, hush, load, memoryAskOf, moveInGame, newsReport, noteFeature, noteTurnText, noteWorked, offerLine, onAttention, onCheckPrompt, onEdit, onGit, onMeasure, onPermission, onSubagents, onTest, onTurnComplete, onTyping, openOffer, openPlazaStream, parkMemo, peersText, peerMatches, fillSend, play, pollPeers, pollPlaza, prepareNews, progressOf, pullFromGacha, placeInRoom, playInRoom, purchase, reflect, refreshShared, remember, roomViewOf, replyToPeer, resetDayIfNeeded, runEncounter, runHalloween, save, say, sendPlaza, sendToPeer, showNews, signalPeers, startBonk, startFocus, sendGuestHome, startHatch, stopFocus, storeInRoom, summarizePeer, viewFriendRoom, visitFriend, switchPet, sync, syncShared, tendVisitor, tendWaitBuddy, think, todayTally, todayWork, toggleWear, tryNews } from './brain'
+import { FOCUS_MINUTES, answerOffer, apologize, askName, balance, giveName, catchInGame, chatted, checkInit, comeHome, createBrain, cycleRoom, demoBoss, demoCoins, demoSouvenir, doingOf, dyeItem, exchangeForStars, giftToFriend, noteDoing, sendSticker, drawPet, ensureScene, feed, fillMemo, forgetMemo, forgetSignal, greet, hush, isPlazaReady, load, memoryAskOf, moveChannel, moveInGame, newsReport, noteFeature, noteTurnText, noteWorked, offerLine, onAttention, onCheckPrompt, onEdit, onGit, onMeasure, onPermission, onSubagents, onTest, onTurnComplete, onTyping, openOffer, openPlazaStream, parkMemo, peersText, peerMatches, fillSend, play, pollPeers, pollPlaza, prepareNews, progressOf, pullFromGacha, placeInRoom, playInRoom, plazaOffText, purchase, reflect, refreshShared, remember, roomViewOf, replyToPeer, resetDayIfNeeded, runEncounter, runHalloween, save, say, sendPlaza, sendToPeer, showNews, signalPeers, startBonk, startFocus, sendGuestHome, startHatch, stopFocus, storeInRoom, summarizePeer, viewFriendRoom, visitFriend, switchPet, sync, syncShared, tendVisitor, tendWaitBuddy, think, todayTally, todayWork, toggleWear, tryNews } from './brain'
 import type { Brain } from './brain'
 import { BADGES, badgeText } from './lib/badges'
 import { BOSS_REWARD, BOSS_STREAK, failedCount } from './lib/boss'
@@ -17,7 +17,7 @@ import { RESERVED_AI_CALLS, bubbleLine, chatRules, nameProblem } from './lib/per
 import { RARITY_LABEL, SPECIES, STAGE_LABEL, UNNAMED, isAwaitingName, nameOf, rarityOf } from './lib/pet'
 import { memoText } from './lib/memo'
 import type { Limit } from './lib/meter'
-import { ROOM_ACTS, ROOM_ACT_LABEL, bonkBoardText, findFriend, isRoomAct, plazaEndpoint, weatherText } from './lib/plaza'
+import { ROOM_ACTS, ROOM_ACT_LABEL, bonkBoardText, channelsText, findFriend, isRoomAct, plazaEndpoint, weatherText } from './lib/plaza'
 import type { PlazaAction, RoomAct } from './lib/plaza'
 import { QUEST_BONUS, QUEST_REWARD, questText } from './lib/quests'
 import type { RoomSlot } from './lib/room'
@@ -409,7 +409,7 @@ export const HELP = [
   '/toko answer <선택지> — 토코가 물어본 것에 대답하기 (예: /toko answer 숨 고르기)',
   `/toko gacha fashion | gacha pet — 패션 아이템 · 애완동물 랜덤 뽑기(각 ${GACHA.fashion.price}코인, 안 가진 것만 나와요)`,
   '/toko pets | pick <번호|이름> — 보관함 보기 · 같이 다닐 펫 바꾸기',
-  '/toko plaza on | off | link | wave <이름|all> | heart <이름> | snack <이름> | cheer <이름> | invite — 광장(link: 브라우저에서 내 펫 움직이기)',
+  '/toko plaza on | off | link | channel [번호] | wave <이름|all> | heart <이름> | snack <이름> | cheer <이름> | invite — 광장(link: 브라우저에서 내 펫 움직이기, channel: 채널 보기 · 옮기기)',
   '/toko event <종류> [shiny] — 이벤트나 장면 바로 보기(시연용, update: 새 기능 소개, halloween: 할로윈 장면, boss: 보스전, souvenir: 휴식 기념품, coins [개수]: 코인 받기)',
   '/bonk <이유> — 뿅망치로 Claude 때리기',
   '/feed · /play — 먹이 · 놀기',
@@ -561,6 +561,15 @@ const coinGuide = (brain: Brain): string => {
 
 const PLAZA_WORDS: Readonly<Record<string, PlazaAction>> = { wave: 'wave', heart: 'heart', snack: 'snack', cheer: 'cheer', invite: 'stretch-call' }
 
+async function channelCommand($: $, brain: Brain, target: string): Promise<string> {
+  if (target === '') {
+    return isPlazaReady(brain)
+      ? (channelsText(brain.plazaChannel, brain.plazaChannels, brain.plazaChannelSize) ?? '채널 정보를 아직 받지 못했어요. 잠시 뒤에 다시 해 보세요.')
+      : plazaOffText(brain)
+  }
+  return /^[1-9]\d{0,5}$/.test(target) ? moveChannel($, brain, Number(target)) : '채널 번호는 1 이상의 정수로 써 주세요. 예: /toko plaza channel 2'
+}
+
 async function plazaCommand($: $, brain: Brain, words: readonly string[]): Promise<{ text: string }> {
   const [sub, ...rest] = words
   const target = rest.join(' ')
@@ -577,10 +586,13 @@ async function plazaCommand($: $, brain: Brain, words: readonly string[]): Promi
           : [`이 주소를 브라우저로 열면 광장에서 ${nameOf(brain.pet) ?? '토코'}을(를) 직접 움직일 수 있어요. 방향키로 걷고 Enter로 말해요.`, '주소에 내 광장 id가 들어 있으니 다른 사람에게 보내지 마세요.', url].join('\n'),
     }
   }
+  if (sub === 'channel') {
+    return { text: await channelCommand($, brain, target) }
+  }
   const action = sub === undefined ? undefined : PLAZA_WORDS[sub]
   if (action === undefined) {
     const friends = brain.friends.map(friend => `- ${friend.name} (${SPECIES[friend.species].label}, ${friend.status})`)
-    const header = brain.serverUrl.length === 0 ? '광장 서버가 설정되지 않았어요(serverUrl).' : `광장: ${brain.settings.isPlazaOn ? '켜짐' : '꺼짐'} · 친구 ${brain.friends.length}명`
+    const header = brain.serverUrl.length === 0 ? '광장 서버가 설정되지 않았어요(serverUrl).' : `광장: ${brain.settings.isPlazaOn ? '켜짐' : '꺼짐'}${brain.plazaChannel === null ? '' : ` · ${brain.plazaChannel}번 채널`} · 친구 ${brain.friends.length}명`
     const board = bonkBoardText(brain.plazaBonks)
     const weather = weatherText(brain.plazaWeather)
     return { text: [header, ...(weather === null ? [] : [weather]), ...friends, ...(board === null ? [] : [board])].join('\n') }
