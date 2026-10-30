@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { TUNER_USAGE_URL, WEATHER_KEEP_MS, claudeCodeGenerator, createPlaza, dllmGenerator, nextWeather, pickGenerator, readTunerUsage, sanitizeLine, watchWeather, weatherOf } from './plaza'
+import { TUNER_USAGE_URL, WEATHER_KEEP_MS, claudeCodeGenerator, createPlaza, dllmGenerator, nextWeather, pickChannel, pickGenerator, readTunerUsage, sanitizeLine, watchWeather, weatherOf } from './plaza'
 
 const me = (id: string, name: string) => ({ id, name, color: 'mint', mood: 'calm', status: 'working' })
 
@@ -58,7 +58,7 @@ describe('plaza', () => {
 
   test('friends who are working or just changed come first, so late arrivals are not hidden behind the first thirty', async () => {
     let clock = 1_000
-    const plaza = createPlaza({ now: () => clock })
+    const plaza = createPlaza({ now: () => clock, channelSize: 100 })
     for (let i = 10; i < 45; i += 1) {
       clock += 1_000
       await plaza.handle(post('/v1/poll', { me: { ...me(`pet${i}`, `펫${i}`), status: 'idle' }, since: 0 }))
@@ -241,7 +241,8 @@ describe('plaza', () => {
     expect(view.events.map((event: { kind: string }) => event.kind)).toEqual(['heart'])
     expect([view.events[0].from, view.events[0].to]).toEqual(view.pets.map((pet: { key: string }) => pet.key))
     const html = await (await plaza.handle(new Request('http://plaza.test/'))).text()
-    expect(html).toContain("fetch('/v1/plaza'")
+    expect(html).toContain('/v1/ws?')
+    expect(html).toContain('fetch(`/v1/plaza?channel=')
     expect(html).not.toContain('{{')
     expect(`${html}${JSON.stringify(view)}`).not.toContain('aaaa1')
     expect(JSON.parse(html.match(/<script id="state" type="application\/json">(.*?)<\/script>/)?.[1] ?? '{}').pets.length).toBe(2)
@@ -572,5 +573,266 @@ describe('claude tuner weather', () => {
       })
     const leaked = roots.flatMap(files).filter(path => /ctk_eyJ[\w-]+\.[\w-]+/.test(readFileSync(path, 'utf8')))
     expect(leaked).toEqual([])
+  })
+})
+
+describe('channels', () => {
+  const fill = async (plaza: ReturnType<typeof createPlaza>, count: number, from = 0) => {
+    for (let index = from; index < from + count; index += 1) {
+      await plaza.handle(post('/v1/poll', { me: me(`pet-${index}`, `펫${index}`), since: 0 }))
+    }
+  }
+
+  const open = async (plaza: ReturnType<typeof createPlaza>, query: string) => {
+    const server = Bun.serve({ port: 0, fetch: (request, bun) => (plaza.upgrade(request, bun) ? undefined : plaza.handle(request)), websocket: plaza.websocket })
+    const socket = new WebSocket(`ws://localhost:${server.port}/v1/ws${query}`)
+    const inbox: Record<string, any>[] = []
+    socket.addEventListener('message', message => inbox.push(JSON.parse(String(message.data))))
+    await new Promise(resolve => socket.addEventListener('open', resolve))
+    const next = async (t: string): Promise<Record<string, any>> => {
+      for (let tries = 0; tries < 100; tries += 1) {
+        const found = inbox.findIndex(message => message.t === t)
+        if (found >= 0) {
+          return inbox.splice(found, 1)[0] ?? {}
+        }
+        await Bun.sleep(10)
+      }
+      throw new Error(`no ${t} message`)
+    }
+    return { socket, next, inbox, close: () => (socket.close(), server.stop(true)) }
+  }
+
+  test('the lowest channel with room is picked, and a new one opens only when every channel is full', () => {
+    expect(pickChannel(new Map(), 20)).toBe(1)
+    expect(pickChannel(new Map([[1, 19]]), 20)).toBe(1)
+    expect(pickChannel(new Map([[1, 20]]), 20)).toBe(2)
+    expect(pickChannel(new Map([[1, 20], [3, 4]]), 20)).toBe(2)
+    expect(pickChannel(new Map([[1, 20], [2, 20]]), 20)).toBe(3)
+  })
+
+  test('the twenty-first pet opens channel 2, and friends and waves to everyone stay inside a channel', async () => {
+    const plaza = createPlaza()
+    await fill(plaza, 21)
+    const first = (await read(await plaza.handle(post('/v1/poll', { me: me('pet-0', '펫0'), since: 0 })))).body
+    const late = (await read(await plaza.handle(post('/v1/poll', { me: me('pet-20', '펫20'), since: 0 })))).body
+    expect([first.channel, late.channel]).toEqual([1, 2])
+    expect(late.channels).toEqual([{ channel: 1, count: 20 }, { channel: 2, count: 1 }])
+    expect(late.channelSize).toBe(20)
+    expect(first.friends.length).toBe(19)
+    expect(late.friends).toEqual([])
+    await plaza.handle(post('/v1/act', { me: me('pet-1', '펫1'), kind: 'cheer', to: null }))
+    await plaza.settle()
+    const after = async (id: string) => (await read(await plaza.handle(post('/v1/poll', { me: me(id, id), since: 0 })))).body.events.map((event: { kind: string }) => event.kind)
+    expect(await after('pet-0')).toContain('cheer')
+    expect(await after('pet-20')).not.toContain('cheer')
+    expect((await read(await plaza.handle(post('/v1/act', { me: me('pet-1', '펫1'), kind: 'wave', to: 'pet-20' })))).body.error).toBe('that friend is not in your channel')
+  })
+
+  test('channel 1 is always listed, a pet can move to a channel with room or the next new one, but not into a full one', async () => {
+    const plaza = createPlaza()
+    expect((await read(await plaza.handle(new Request('http://plaza.test/v1/plaza')))).body.channels).toEqual([{ channel: 1, count: 0 }])
+    await fill(plaza, 21)
+    const move = async (id: string, channel: unknown) => read(await plaza.handle(post('/v1/channel', { me: me(id, id), channel })))
+    expect((await move('pet-20', 1)).status).toBe(409)
+    expect((await move('pet-20', 4)).status).toBe(400)
+    expect((await move('pet-20', 1.5)).status).toBe(400)
+    expect((await move('pet-0', 2)).body).toEqual({ ok: true, channel: 2, channels: [{ channel: 1, count: 19 }, { channel: 2, count: 2 }], channelSize: 20 })
+    expect((await move('pet-0', 3)).body.channels).toEqual([{ channel: 1, count: 19 }, { channel: 2, count: 1 }, { channel: 3, count: 1 }])
+    const page = (await read(await plaza.handle(new Request('http://plaza.test/v1/plaza?channel=3')))).body
+    expect([page.channel, page.pets.length]).toEqual([3, 1])
+    expect((await read(await plaza.handle(new Request('http://plaza.test/v1/plaza?channel=oops')))).body.channel).toBe(1)
+  })
+
+  test('over a websocket a walk and a line reach the same channel at once, and nobody in another channel', async () => {
+    const plaza = createPlaza({ flushMs: 60_000 })
+    await fill(plaza, 21)
+    const mine = await open(plaza, '?id=pet-0')
+    const near = await open(plaza, '?channel=1')
+    const far = await open(plaza, '?channel=2')
+    expect((await mine.next('view')).view.channel).toBe(1)
+    expect((await far.next('view')).view.pets.length).toBe(1)
+    mine.socket.send(JSON.stringify({ t: 'walk', u: 0.5, v: 0.5 }))
+    mine.socket.send(JSON.stringify({ t: 'say', text: '안녕' }))
+    expect((await near.next('walk')).spot).toEqual([0.5, 0.5])
+    expect((await near.next('say')).chat.text).toBe('안녕')
+    mine.socket.send(JSON.stringify({ t: 'say', text: '바보야' }))
+    expect(await mine.next('error')).toEqual({ t: 'error', of: 'say', status: 400 })
+    await Bun.sleep(50)
+    expect(far.inbox.filter(message => message.t !== 'view')).toEqual([])
+    mine.close()
+    near.close()
+    far.close()
+  })
+
+  test('a pet that leaves gives its seat back, an emptied extra channel drops out, and a ping is enough to notice', async () => {
+    let clock = 1_000
+    const plaza = createPlaza({ now: () => clock, friendTtlMs: 60_000, flushMs: 60_000 })
+    await fill(plaza, 21)
+    const viewer = await open(plaza, '?channel=2')
+    expect((await viewer.next('view')).view.pets.length).toBe(1)
+    clock += 30_000
+    await fill(plaza, 20)
+    clock += 40_000
+    viewer.socket.send(JSON.stringify({ t: 'ping' }))
+    await viewer.next('pong')
+    expect(plaza.members.size).toBe(20)
+    const page = (await read(await plaza.handle(new Request('http://plaza.test/v1/plaza')))).body
+    expect(page.channels).toEqual([{ channel: 1, count: 20 }])
+    await plaza.handle(post('/v1/poll', { me: me('pet-0', '펫0'), since: 0 }))
+    clock += 61_000
+    await fill(plaza, 19, 1)
+    const late = (await read(await plaza.handle(post('/v1/poll', { me: me('newcomer', '새내기'), since: 0 })))).body
+    expect(late.channel).toBe(1)
+    viewer.close()
+  })
+
+  test('a pet steered from a page moves channel over its socket, but not into a full one', async () => {
+    const plaza = createPlaza({ flushMs: 60_000 })
+    await fill(plaza, 21)
+    const mine = await open(plaza, '?id=pet-20')
+    expect((await mine.next('view')).view.channel).toBe(2)
+    mine.socket.send(JSON.stringify({ t: 'move', channel: 1 }))
+    expect(await mine.next('error')).toEqual({ t: 'error', of: 'move', status: 409 })
+    expect((await mine.next('view')).view.channel).toBe(2)
+    mine.socket.send(JSON.stringify({ t: 'move', channel: 3 }))
+    expect((await mine.next('view')).view).toMatchObject({ channel: 3, pets: [expect.any(Object)] })
+    mine.close()
+  })
+
+  test('the plugin stream carries my channel and only the friends in it', async () => {
+    const plaza = createPlaza({ keepAliveMs: 60_000 })
+    await fill(plaza, 22)
+    const late = await listen('/v1/stream?id=pet-21&tab=t1', plaza)
+    const first = await late.next('plaza')
+    expect([first.channel, first.channelSize]).toEqual([2, 20])
+    expect(first.friends.map((friend: { id: string }) => friend.id)).toEqual(['pet-20'])
+    await late.close()
+  })
+
+  test('walks closer together than a tenth of a second wait, and only the newest of them lands', async () => {
+    let clock = 1_000
+    const plaza = createPlaza({ now: () => clock })
+    await fill(plaza, 1)
+    const spot = async () => (await read(await plaza.handle(new Request('http://plaza.test/v1/plaza')))).body.pets[0].spot
+    expect((await plaza.handle(post('/v1/walk', { id: 'pet-0', u: 0.1, v: 0.1 }))).status).toBe(202)
+    clock += 50
+    expect((await read(await plaza.handle(post('/v1/walk', { id: 'pet-0', u: 0.2, v: 0.1 })))).body).toEqual({ ok: true, queued: true })
+    clock += 10
+    await plaza.handle(post('/v1/walk', { id: 'pet-0', u: 0.3, v: 0.1 }))
+    expect(await spot()).toEqual([0.1, 0.1])
+    await Bun.sleep(120)
+    expect(await spot()).toEqual([0.3, 0.1])
+  })
+
+  test('a refused action is not counted, so the limit lifts a minute after the last accepted one', async () => {
+    let clock = 1_000
+    const plaza = createPlaza({ now: () => clock, friendTtlMs: 600_000 })
+    await fill(plaza, 2)
+    const cheer = async () => (await plaza.handle(post('/v1/act', { me: me('pet-0', '펫0'), kind: 'cheer', to: null }))).status
+    for (let index = 0; index < 12; index += 1) {
+      expect(await cheer()).toBe(202)
+    }
+    for (let index = 0; index < 15; index += 1) {
+      clock += 3_000
+      expect(await cheer()).toBe(429)
+    }
+    clock += 15_001
+    expect(await cheer()).toBe(202)
+    await plaza.settle()
+  })
+
+  test('a pet can move only so often, and never past channel 999', async () => {
+    const plaza = createPlaza({ channelSize: 1, flushMs: 60_000 })
+    await fill(plaza, 2)
+    const move = async (id: string, channel: number) => (await plaza.handle(post('/v1/channel', { me: me(id, id), channel }))).status
+    const hops = []
+    for (let index = 0; index < 13; index += 1) {
+      hops.push(await move('pet-1', index % 2 === 0 ? 3 : 2))
+    }
+    expect(hops.slice(0, 12).every(status => status === 200)).toBe(true)
+    expect(hops[12]).toBe(429)
+    const crowd = createPlaza({ channelSize: 1, flushMs: 60_000 })
+    await fill(crowd, 999)
+    expect((await read(await crowd.handle(new Request('http://plaza.test/v1/plaza?channel=999')))).body.pets.length).toBe(1)
+    expect((await crowd.handle(post('/v1/channel', { me: me('pet-0', 'pet-0'), channel: 1000 }))).status).toBe(400)
+  })
+
+  test('a pet that left no longer fills a channel, so moving there works without waiting for another request', async () => {
+    let clock = 1_000
+    const plaza = createPlaza({ now: () => clock, friendTtlMs: 60_000, flushMs: 60_000 })
+    await fill(plaza, 21)
+    clock += 30_000
+    await fill(plaza, 19, 1)
+    await plaza.handle(post('/v1/poll', { me: me('pet-20', '펫20'), since: 0 }))
+    clock += 40_000
+    expect((await read(await plaza.handle(post('/v1/channel', { me: me('pet-20', '펫20'), channel: 1 })))).body.channel).toBe(1)
+  })
+
+  test('in one flush a stream page and a socket page in the same channel each get their own format', async () => {
+    const plaza = createPlaza({ keepAliveMs: 60_000, flushMs: 20 })
+    await fill(plaza, 1)
+    const page = await listen('/v1/plaza/stream', plaza)
+    const socket = await open(plaza, '')
+    await page.next('view')
+    await socket.next('view')
+    await fill(plaza, 1, 1)
+    expect((await page.next('view')).pets.length).toBe(2)
+    expect((await socket.next('view')).view.pets.length).toBe(2)
+    await page.close()
+    socket.close()
+  })
+
+  test('a wave to everyone stays in the channel it was sent from, even if the sender moves before the line is written', async () => {
+    let release = (_: string) => {}
+    const plaza = createPlaza({ generate: () => new Promise(resolve => (release = resolve)) })
+    await fill(plaza, 3)
+    await plaza.handle(post('/v1/act', { me: me('pet-0', '펫0'), kind: 'cheer', to: null }))
+    await plaza.handle(post('/v1/channel', { me: me('pet-0', '펫0'), channel: 2 }))
+    release('힘내!')
+    await plaza.settle()
+    const kinds = async (id: string) => (await read(await plaza.handle(post('/v1/poll', { me: me(id, id), since: 0 })))).body.events.map((event: { kind: string }) => event.kind)
+    expect(await kinds('pet-1')).toContain('cheer')
+    expect((await read(await plaza.handle(new Request('http://plaza.test/v1/plaza?channel=2')))).body.events).toEqual([])
+  })
+
+  test('a page can wave at a nearby pet by its public key, but not at itself, at an odd kind, or across channels', async () => {
+    const plaza = createPlaza({ flushMs: 60_000 })
+    await fill(plaza, 21)
+    const mine = await open(plaza, '?id=pet-0')
+    const view = (await mine.next('view')).view
+    const keyOf = (name: string) => view.pets.find((pet: { name: string }) => pet.name === name).key
+    mine.socket.send(JSON.stringify({ t: 'act', kind: 'wave', to: keyOf('펫1') }))
+    await Bun.sleep(30)
+    await plaza.settle()
+    const events = (await read(await plaza.handle(post('/v1/poll', { me: me('pet-1', '펫1'), since: 0 })))).body.events
+    expect(events.map((event: { kind: string; from: { id: string } }) => [event.kind, event.from.id])).toContainEqual(['wave', 'pet-0'])
+    mine.socket.send(JSON.stringify({ t: 'act', kind: 'wave', to: keyOf('펫0') }))
+    expect(await mine.next('error')).toEqual({ t: 'error', of: 'act', status: 404 })
+    mine.socket.send(JSON.stringify({ t: 'act', kind: 'punch', to: keyOf('펫1') }))
+    expect(await mine.next('error')).toEqual({ t: 'error', of: 'act', status: 400 })
+    const far = (await read(await plaza.handle(new Request('http://plaza.test/v1/plaza?channel=2')))).body.pets[0].key
+    mine.socket.send(JSON.stringify({ t: 'act', kind: 'heart', to: far }))
+    expect(await mine.next('error')).toEqual({ t: 'error', of: 'act', status: 404 })
+    const viewer = await open(plaza, '')
+    viewer.socket.send(JSON.stringify({ t: 'act', kind: 'wave', to: keyOf('펫1') }))
+    expect(await viewer.next('error')).toEqual({ t: 'error', of: 'act', status: 404 })
+    mine.close()
+    viewer.close()
+  })
+
+  test('a page without a pet only watches: it can switch channels and ping, but not walk or talk', async () => {
+    const plaza = createPlaza({ flushMs: 60_000 })
+    await fill(plaza, 21)
+    const viewer = await open(plaza, '')
+    expect((await viewer.next('view')).view.pets.length).toBe(20)
+    viewer.socket.send(JSON.stringify({ t: 'move', channel: 2 }))
+    expect((await viewer.next('view')).view).toMatchObject({ channel: 2, pets: [expect.any(Object)] })
+    viewer.socket.send(JSON.stringify({ t: 'move', channel: 9 }))
+    expect(await viewer.next('error')).toEqual({ t: 'error', of: 'move', status: 400 })
+    viewer.socket.send(JSON.stringify({ t: 'walk', u: 0, v: 0 }))
+    expect(await viewer.next('error')).toEqual({ t: 'error', of: 'walk', status: 404 })
+    viewer.socket.send(JSON.stringify({ t: 'ping' }))
+    expect(await viewer.next('pong')).toEqual({ t: 'pong' })
+    viewer.close()
   })
 })

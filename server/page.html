@@ -36,17 +36,43 @@ body{font-family:Galmuri11,'Apple SD Gothic Neo','Noto Sans KR',sans-serif;color
 .board ol{margin:6px 0 0;padding-left:18px;font-size:11px;line-height:1.6}
 .board b{color:#ffe2c2}
 @keyframes pop{from{scale:.4;opacity:0}}
-.rooms{position:fixed;right:20px;top:20px;display:flex;flex-direction:column;gap:6px;max-width:220px;padding:10px 12px;background:#fffaf0;border:3px solid var(--ink);box-shadow:0 4px 0 rgba(61,51,70,.3);font-size:12px}
+.side{position:fixed;right:20px;top:20px;display:flex;flex-direction:column;gap:10px;width:220px}
+.rooms{display:flex;flex-direction:column;gap:6px;padding:10px 12px;background:#fffaf0;border:3px solid var(--ink);box-shadow:0 4px 0 rgba(61,51,70,.3);font-size:12px}
 .rooms b{font:14px/1 Galmuri14,Galmuri11,sans-serif}
-.rooms button,#roomView button{font:inherit;color:var(--ink);text-align:left;padding:4px 8px;border:2px solid var(--ink);background:#ffe8c7;cursor:pointer}
-.rooms button:hover,#roomView button:hover{background:#ffd49a}
+.rooms button,#roomView button,#connectView button{font:inherit;color:var(--ink);text-align:left;padding:4px 8px;border:2px solid var(--ink);background:#ffe8c7;cursor:pointer}
+.rooms button:hover,#roomView button:hover,#connectView button:hover{background:#ffd49a}
+.rooms button.here{background:#ffd49a;border-color:#e0578f}
+.rooms button:disabled{background:#f1ece4;color:#7a6f80;border-style:dashed;cursor:default}
+.rooms ul{margin:0;padding-left:16px;line-height:1.6}
+.rooms li.mine{color:#e0578f}
+.rooms summary{cursor:pointer}
+.rooms .note{margin:0;color:#c27c1a}
+.near{position:fixed;left:0;top:0;display:flex;align-items:center;gap:4px;padding:4px 6px;border:2px solid var(--ink);background:#fffaf0;box-shadow:0 2px 0 rgba(61,51,70,.3);font:11px Galmuri11,sans-serif;color:var(--ink);white-space:nowrap}
+.near[hidden]{display:none}
+.near button{font:inherit;color:var(--ink);padding:2px 6px;border:2px solid var(--ink);background:#ffe8c7;cursor:pointer}
+.near button:hover{background:#ffd49a}
+.near kbd{font:inherit;color:#e0578f;margin-right:3px}
+.near .note{color:#c27c1a}
+.connect{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);font:12px Galmuri11,sans-serif;color:var(--ink);padding:8px 14px;border:3px solid var(--ink);background:#ffe8c7;box-shadow:0 4px 0 rgba(61,51,70,.3);cursor:pointer}
+.connect:hover{background:#ffd49a}
+.connect[hidden]{display:none}
+#connectView{padding:16px;border:4px solid var(--ink);background:#fffaf0;color:var(--ink);font:12px Galmuri11,sans-serif;width:min(360px,calc(100vw - 40px))}
+#connectView::backdrop{background:rgba(43,34,51,.55)}
+#connectView h2{margin:0 0 10px;font:16px/1.2 Galmuri14,Galmuri11,sans-serif}
+#connectView ol{margin:0 0 10px;padding-left:18px;line-height:1.7}
+#connectView code{background:#ffe8c7;padding:0 4px}
+#connectView input{box-sizing:border-box;width:100%;font:12px Galmuri11,sans-serif;color:var(--ink);padding:6px 8px;border:2px solid var(--ink);background:#fff}
+#connectView p{margin:8px 0}
+#connectView .warn{color:#8a7f96}
+#connectView .away{color:#c27c1a}
+#connectView menu{display:flex;gap:6px;justify-content:flex-end;margin:12px 0 0;padding:0}
 .rooms button.out{background:#f1ece4;color:#7a6f80;border-style:dashed}
 #roomView{padding:14px;border:4px solid var(--ink);background:#fffaf0;color:var(--ink);font:12px Galmuri11,sans-serif;max-width:calc(100vw - 40px)}
 #roomView::backdrop{background:rgba(43,34,51,.55)}
 #roomCanvas{display:block;max-width:100%;image-rendering:pixelated;background:#2b2233}
 #roomView p{margin:10px 0}
-.chat[hidden]{display:none}
-@media (max-width:520px){.chat{bottom:auto;top:50%}.sign{left:14px;top:14px;right:14px}.sign h1{font-size:22px}.board{top:auto;bottom:14px}.tag i{display:none}.rooms{top:auto;bottom:14px;right:14px}}
+.chat[hidden],.rooms[hidden]{display:none}
+@media (max-width:520px){.chat{bottom:auto;top:50%}.sign{left:14px;top:14px;right:14px}.sign h1{font-size:22px}.board{top:auto;bottom:14px}.tag i{display:none}.side{top:auto;bottom:14px;right:14px;width:auto;max-width:44vw}.board{max-width:44vw;padding-right:16px}#bonk-art{display:none}.connect{bottom:auto;top:50%}}
 </style>
 </head>
 <body>
@@ -54,8 +80,21 @@ body{font-family:Galmuri11,'Apple SD Gothic Neo','Noto Sans KR',sans-serif;color
 <div id="labels" aria-hidden="true"></div>
 <header class="sign"><h1>토코 광장</h1><p id="count">지금 {{count}}마리가 함께 쉬어 가는 중이에요</p><p class="hint">Claude Code에서 토코를 켜 두면 여기로 놀러 와요</p><p class="weather" id="weather" hidden></p></header>
 <aside class="sign board" id="bonks" hidden><h2>뿅망치 전광판</h2><p>오늘 Clawd가 <b id="bonk-total">0</b>번 맞았어요</p><ol id="bonk-top"></ol><canvas id="bonk-art" width="26" height="20" aria-hidden="true"></canvas></aside>
+<div class="side">
+<nav id="channels" class="rooms" aria-label="채널"><b id="channelTitle">1번 채널</b><div id="channelList" style="display:flex;flex-wrap:wrap;gap:4px"></div><p id="channelNote" class="note" hidden></p><details><summary id="memberTitle">이 채널 멤버</summary><ul id="memberList"></ul></details></nav>
 <nav id="rooms" class="rooms" aria-label="열린 방" hidden><b>방 구경</b><div id="roomList" style="display:flex;flex-direction:column;gap:4px"></div></nav>
+</div>
 <dialog id="roomView" aria-labelledby="roomTitle"><canvas id="roomCanvas"></canvas><p id="roomTitle"></p><button id="roomClose" type="button">닫기</button></dialog>
+<div id="near" class="near" role="toolbar" aria-label="가까운 친구에게 손짓" hidden><b id="nearName"></b><button type="button" data-act="wave"><kbd>1</kbd>손 흔들기</button><button type="button" data-act="heart"><kbd>2</kbd>하트</button><button type="button" data-act="snack"><kbd>3</kbd>간식</button><button type="button" data-act="cheer"><kbd>4</kbd>응원</button><span id="nearNote" class="note" hidden></span></div>
+<button id="connectOpen" class="connect" type="button" hidden>내 토코 연결하기</button>
+<dialog id="connectView" aria-labelledby="connectTitle"><form id="connectForm" method="dialog">
+<h2 id="connectTitle">내 토코 연결하기</h2>
+<p id="connectAway" class="away" hidden>내 토코가 지금 광장에 없어요. Claude Code에서 <code>/toko plaza on</code>을 켜 두면 들어와요. 다른 토코로 바꾸려면 아래에 새 주소를 넣어요.</p>
+<ol><li>Claude Code에서 <code>/toko plaza link</code>를 실행해요</li><li>나온 주소를 아래에 붙여넣어요</li></ol>
+<input id="connectText" autocomplete="off" spellcheck="false" placeholder="https://…/#me=…" aria-label="광장 주소">
+<p id="connectHint" class="warn">주소에 내 광장 id가 들어 있으니 다른 사람에게 보내지 마세요</p>
+<menu><button id="connectClose" type="button">나중에</button><button type="submit">연결</button></menu>
+</form></dialog>
 <form id="chat" class="chat" hidden><input id="chatText" maxlength="40" autocomplete="off" placeholder="방향키로 걷고, Enter로 말하기" aria-label="광장에서 말하기"><button type="submit">말하기</button></form>
 <p id="empty" {{empty}}>아직 아무도 없어요. 토코를 데리고 놀러 오세요</p>
 <noscript><ul>{{roster}}</ul></noscript>
@@ -114,12 +153,20 @@ const hashOf = text => {
   for (let index = 0; index < text.length; index += 1) hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193) >>> 0
   return hash.toString(36)
 }
+const remember = id => {
+  try {
+    localStorage.setItem(ME_KEY, id)
+  } catch {}
+}
+const idFromPaste = text => {
+  const value = text.trim()
+  const id = /#me=([^\s#&]+)/.exec(value)?.[1] ?? value
+  return /^[a-z0-9-]{4,64}$/i.test(id) ? id : null
+}
 const readMe = () => {
   const match = /^#me=([a-z0-9-]{4,64})$/i.exec(location.hash)
   if (match !== null) {
-    try {
-      localStorage.setItem(ME_KEY, match[1])
-    } catch {}
+    remember(match[1])
     history.replaceState(null, '', location.pathname + location.search)
     return match[1]
   }
@@ -129,8 +176,12 @@ const readMe = () => {
     return null
   }
 }
-const myId = readMe()
-const myKey = myId === null ? null : hashOf(myId)
+let myId = readMe()
+let myKey = myId === null ? null : hashOf(myId)
+let channel = Math.max(1, Math.floor(Number(new URLSearchParams(location.search).get('channel'))) || 1)
+let socket = null
+let retryMs = 1000
+let retryTimer
 const sheet = (w, h, paint) => {
   const c = document.createElement('canvas')
   c.width = w
@@ -805,14 +856,16 @@ const sendSpot = pet => {
   pet.sentAt = clock
   const [u, v] = toSpot(pet)
   pet.spot = [u, v]
-  fetch('/v1/walk', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: myId, u, v }) }).catch(() => {})
+  if (!send({ t: 'walk', u, v })) fetch('/v1/walk', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: myId, u, v }) }).catch(() => {})
 }
 
 const steer = (pet, dt) => {
   const [dx, dy] = [...held].reduce(([x, y], key) => [x + ARROWS[key][0], y + ARROWS[key][1]], [0, 0])
   if (dx === 0 && dy === 0) {
-    if (pet.steering) sendSpot(pet)
-    pet.steering = false
+    if (pet.steering && clock - pet.sentAt >= STEER_SEND_EVERY) {
+      sendSpot(pet)
+      pet.steering = false
+    }
     return false
   }
   const length = Math.hypot(dx, dy)
@@ -825,7 +878,168 @@ const steer = (pet, dt) => {
   return true
 }
 
+const hearChat = (chat, isFresh) => {
+  if (seen.has(chat.key)) return
+  seen.add(chat.key)
+  const echo = chat.from === myKey ? echoes.indexOf(chat.text) : -1
+  if (echo >= 0) echoes.splice(echo, 1)
+  else if (pets.has(chat.from) && isFresh) shout(pets.get(chat.from), chat.text)
+}
+
+const isHere = () => myKey !== null && pets.has(myKey)
+
+const showConnect = () => {
+  $('chat').hidden = !isHere()
+  $('connectOpen').hidden = isHere()
+  $('connectOpen').textContent = myKey === null ? '내 토코 연결하기' : '내 토코가 광장에 없어요'
+  $('connectAway').hidden = myKey === null
+}
+
+const note = text => {
+  $('channelNote').textContent = text
+  $('channelNote').hidden = false
+  setTimeout(() => ($('channelNote').hidden = true), 3000)
+}
+
+const showChannels = view => {
+  channel = view.channel ?? 1
+  const size = view.channelSize ?? 20
+  $('channelTitle').textContent = `${channel}번 채널 · ${view.pets.length}/${size}`
+  $('channelList').replaceChildren(
+    ...(view.channels ?? []).map(entry => {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.textContent = `${entry.channel}번 ${entry.count}/${size}`
+      button.classList.toggle('here', entry.channel === channel)
+      button.disabled = entry.channel === channel || (isHere() && entry.count >= size)
+      button.addEventListener('click', () => {
+        if (!send({ t: 'move', channel: entry.channel })) note('광장과 다시 이어지는 중이에요')
+      })
+      return button
+    }),
+  )
+  $('memberTitle').textContent = `이 채널 멤버 ${view.pets.length}`
+  $('memberList').replaceChildren(
+    ...view.pets.map(data => {
+      const item = document.createElement('li')
+      item.textContent = `${data.name} · ${MOOD[data.mood] ?? MOOD.calm}`
+      item.classList.toggle('mine', data.key === myKey)
+      return item
+    }),
+  )
+  if (!isHere()) {
+    const query = new URLSearchParams(location.search)
+    if (channel === 1) query.delete('channel')
+    else query.set('channel', String(channel))
+    history.replaceState(null, '', query.size === 0 ? location.pathname : `${location.pathname}?${query}`)
+  }
+}
+
+const send = message => {
+  if (socket?.readyState !== WebSocket.OPEN) return false
+  socket.send(JSON.stringify(message))
+  return true
+}
+
+const SAY_HINT = { 429: '조금 쉬었다가 말해요', 400: '그 말은 광장에서 못 해요' }
+const ACT_NOTE = { 429: '조금 쉬었다가 해요', 404: '그 친구에게 닿지 않았어요' }
+const ACT_LABEL = { wave: '손 흔들기', heart: '하트', snack: '간식', cheer: '응원' }
+const ACT_KEYS = { 1: 'wave', 2: 'heart', 3: 'snack', 4: 'cheer' }
+const NEAR_REACH = 26
+const isPlainKey = event => !event.ctrlKey && !event.metaKey && !event.altKey
+let near = null
+let nearNoteTimer
+
+const nearest = () => {
+  const mine = isHere() ? pets.get(myKey) : undefined
+  if (mine === undefined) return null
+  const around = [...pets.values()]
+    .filter(pet => pet !== mine && pet.mode !== 'leave' && pet.mode !== 'visit')
+    .map(pet => ({ pet, gap: Math.hypot(pet.x - mine.x, (pet.y - mine.y) * 1.6) }))
+    .filter(entry => entry.gap <= NEAR_REACH)
+  return around.length === 0 ? null : around.reduce((best, entry) => (entry.gap < best.gap ? entry : best)).pet
+}
+
+const noteNear = text => {
+  $('nearNote').textContent = text
+  $('nearNote').hidden = false
+  clearTimeout(nearNoteTimer)
+  nearNoteTimer = setTimeout(() => ($('nearNote').hidden = true), 2500)
+}
+
+const sendAct = kind => {
+  if (near === null) return
+  noteNear(send({ t: 'act', kind, to: near.key }) ? `${ACT_LABEL[kind]} 보냈어요` : '광장과 다시 이어지는 중이에요')
+}
+
+const showNear = () => {
+  const next = $('connectView').open || $('roomView').open ? null : nearest()
+  if (next !== near) $('nearNote').hidden = true
+  near = next
+  $('near').hidden = near === null
+  if (near === null) return
+  $('nearName').textContent = `${near.name}에게`
+  $('near').style.transform = `translate(${Math.round(near.x) * S}px, ${(Math.round(near.y) + 3) * S + 22}px) translateX(-50%)`
+}
+const MOVE_NOTE = { 409: '그 채널은 가득 찼어요', 400: '없는 채널이에요' }
+
+const hear = message => {
+  if (message.t === 'view') sync(message.view)
+  else if (message.t === 'walk') follow(pets.get(message.key), message.spot)
+  else if (message.t === 'say') hearChat(message.chat, true)
+  else if (message.t === 'error' && message.of === 'say') {
+    echoes.shift()
+    hint(SAY_HINT[message.status] ?? '말이 전해지지 않았어요')
+  } else if (message.t === 'error' && message.of === 'move') note(MOVE_NOTE[message.status] ?? '채널을 옮기지 못했어요')
+  else if (message.t === 'error' && message.of === 'act') noteNear(ACT_NOTE[message.status] ?? '손짓이 전해지지 않았어요')
+}
+
+const openSocket = () => {
+  const query = new URLSearchParams({ channel: String(channel), ...(myId === null ? {} : { id: myId }) })
+  const next = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/v1/ws?${query}`)
+  socket = next
+  next.addEventListener('open', () => (retryMs = 1000))
+  next.addEventListener('message', message => hear(JSON.parse(message.data)))
+  next.addEventListener('close', () => {
+    if (socket !== next) return
+    socket = null
+    retryTimer = setTimeout(openSocket, retryMs)
+    retryMs = Math.min(retryMs * 2, 30_000)
+  })
+}
+
+const reopenSocket = () => {
+  clearTimeout(retryTimer)
+  const old = socket
+  socket = null
+  old?.close()
+  openSocket()
+}
+
+const connect = id => {
+  remember(id)
+  myId = id
+  myKey = hashOf(id)
+  held.clear()
+  for (const pet of pets.values()) pet.tag.classList.toggle('mine', pet.key === myKey)
+  showConnect()
+  reopenSocket()
+}
+
+const clearPlaza = () => {
+  for (const pet of pets.values()) {
+    pet.tag.remove()
+    pet.say?.remove()
+  }
+  pets.clear()
+  for (const bubble of floats) bubble.el.remove()
+  floats.length = 0
+  effects.length = 0
+  isFirstSync = true
+}
+
 const sync = view => {
+  if ((view.channel ?? 1) !== channel) clearPlaza()
   showRooms(view.rooms)
   const keys = new Set(view.pets.map(data => data.key))
   for (const data of view.pets) {
@@ -839,21 +1053,16 @@ const sync = view => {
   }
   for (const data of view.pets) follow(pets.get(data.key), data.spot)
   for (const pet of pets.values()) if (!keys.has(pet.key) && pet.mode !== 'leave') leave(pet)
-  for (const chat of view.chats ?? []) {
-    if (seen.has(chat.key)) continue
-    seen.add(chat.key)
-    const echo = chat.from === myKey ? echoes.indexOf(chat.text) : -1
-    if (echo >= 0) echoes.splice(echo, 1)
-    else if (pets.has(chat.from) && (!isFirstSync || view.now - chat.at < 10_000)) shout(pets.get(chat.from), chat.text)
-  }
-  $('chat').hidden = myKey === null || !pets.has(myKey)
+  for (const chat of view.chats ?? []) hearChat(chat, !isFirstSync || view.now - chat.at < 10_000)
+  showChannels(view)
+  showConnect()
   for (const event of view.events) {
     if (seen.has(event.key)) continue
     seen.add(event.key)
     if (!isFirstSync || view.now - event.at < 15_000) play(event)
   }
   isFirstSync = false
-  $('count').textContent = `지금 ${view.pets.length}마리가 함께 쉬어 가는 중이에요`
+  $('count').textContent = `${channel}번 채널에서 ${view.pets.length}마리가 함께 쉬어 가는 중이에요`
   $('empty').hidden = view.pets.length > 0
   showWeather(view.weather)
   const board = view.bonks ?? { total: 0, top: [] }
@@ -1133,6 +1342,7 @@ const tick = now => {
     ctx.globalCompositeOperation = 'source-over'
   }
   placeLabels()
+  showNear()
   if (!bonkBoard.hidden) drawBonkArt()
   requestAnimationFrame(tick)
 }
@@ -1163,7 +1373,7 @@ const resize = () => {
 
 const poll = async () => {
   try {
-    const response = await fetch('/v1/plaza', { cache: 'no-store' })
+    const response = await fetch(`/v1/plaza?channel=${channel}`, { cache: 'no-store' })
     if (response.ok) sync(await response.json())
   } catch {}
 }
@@ -1175,13 +1385,18 @@ addEventListener('resize', resize)
 const chatText = $('chatText')
 const isTyping = () => document.activeElement === chatText
 addEventListener('keydown', event => {
-  if (myKey === null || !pets.has(myKey) || $('roomView').open) return
+  if (!isHere() || $('roomView').open || $('connectView').open) return
   if (event.key === 'Enter' && !isTyping()) {
     event.preventDefault()
     chatText.focus()
     return
   }
   if (event.key === 'Escape' && isTyping()) chatText.blur()
+  if (!isTyping() && isPlainKey(event) && near !== null && ACT_KEYS[event.key] !== undefined) {
+    event.preventDefault()
+    if (!event.repeat) sendAct(ACT_KEYS[event.key])
+    return
+  }
   if (isTyping() || ARROWS[event.key] === undefined) return
   event.preventDefault()
   held.add(event.key)
@@ -1202,13 +1417,32 @@ $('chat').addEventListener('submit', async event => {
   if (text.length === 0 || pet === undefined) return
   shout(pet, text)
   echoes.push(text)
+  if (send({ t: 'say', text })) return
   const response = await fetch('/v1/say', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: myId, text }) }).catch(() => null)
   if (response?.ok) return
   echoes.splice(echoes.indexOf(text), 1)
-  hint(response?.status === 429 ? '조금 쉬었다가 말해요' : response?.status === 400 ? '그 말은 광장에서 못 해요' : '말이 전해지지 않았어요')
+  hint(SAY_HINT[response?.status] ?? '말이 전해지지 않았어요')
 })
-if ('EventSource' in window) new EventSource('/v1/plaza/stream').addEventListener('view', message => sync(JSON.parse(message.data)))
+$('near').addEventListener('click', event => {
+  const kind = event.target.closest('button')?.dataset.act
+  if (kind !== undefined) sendAct(kind)
+})
+$('connectOpen').addEventListener('click', () => $('connectView').showModal())
+$('connectClose').addEventListener('click', () => $('connectView').close())
+$('connectForm').addEventListener('submit', event => {
+  const id = idFromPaste($('connectText').value)
+  if (id === null) {
+    event.preventDefault()
+    $('connectHint').textContent = '주소에서 광장 id를 찾지 못했어요. /toko plaza link가 준 주소를 통째로 붙여넣어 주세요'
+    return
+  }
+  $('connectText').value = ''
+  connect(id)
+})
+if ('WebSocket' in window) openSocket()
 else setInterval(poll, 4000)
+setInterval(() => send({ t: 'ping' }), 25_000)
+if (myId === null) $('connectView').showModal()
 setInterval(() => {
   phase = phaseOf(hourNow())
 }, 60_000)

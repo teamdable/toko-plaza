@@ -25,6 +25,7 @@ export type PlazaEvent = {
   line: string
   act?: RoomAct
   guest?: string
+  channel?: number
 }
 
 export type Layout = Readonly<Record<string, string>>
@@ -51,6 +52,7 @@ export type PlazaOptions = {
   flushMs?: number
   maxGuests?: number
   storage?: Storage
+  channelSize?: number
 }
 
 const COLORS: ReadonlySet<string> = new Set(['honey', 'mint', 'peach', 'lavender'])
@@ -369,7 +371,31 @@ export const parseSaved = (text: string | null): Saved => {
 
 const TAB_TTL_MS = 45_000
 
-type Listener = { id: string | null; send: (text: string) => void }
+type Listener = { id: string | null; watch: number; isSocket: boolean; send: (text: string) => void }
+
+export type ChannelCount = { channel: number; count: number }
+
+export type Seat = { channel: number; channels: ChannelCount[]; channelSize: number }
+
+export const CHANNEL_SIZE = 20
+
+const MAX_CHANNEL = 999
+
+const WALK_GAP_MS = 100
+
+export const pickChannel = (counts: ReadonlyMap<number, number>, size: number): number =>
+  Array.from({ length: counts.size + 1 }, (_, index) => index + 1).find(channel => (counts.get(channel) ?? 0) < size) ?? counts.size + 1
+
+const channelParam = (url: URL): number => {
+  const value = Number(url.searchParams.get('channel'))
+  return Number.isInteger(value) && value >= 1 && value <= MAX_CHANNEL ? value : 1
+}
+
+type SocketData = { id: string | null; watch: number }
+
+type Upgrader = { upgrade: (request: Request, options: { data: SocketData }) => boolean }
+
+type Peer = { data: SocketData; send: (text: string) => unknown }
 
 const sseMessage = (name: string, data: unknown): string => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`
 
@@ -477,7 +503,7 @@ const hashOf = (text: string): string => {
 
 export type Spot = { u: number; v: number }
 
-export type Chat = { id: string; from: string; at: number; text: string }
+export type Chat = { id: string; from: string; at: number; text: string; channel: number }
 
 export const CHAT_TTL_MS = 30_000
 const MAX_CHATS = 20
@@ -492,7 +518,7 @@ export type PlazaView = {
   rooms: RoomView[]
   weather: Weather | null
   chats: { key: string; from: string; at: number; text: string }[]
-}
+} & Seat
 
 const isAction = (kind: PlazaEvent['kind']): kind is Action => ACTIONS.has(kind)
 
@@ -505,7 +531,9 @@ export const plazaView = (
   weather: Weather | null = null,
   spots: ReadonlyMap<string, Spot> = new Map(),
   chats: readonly Chat[] = [],
+  seat: Seat = { channel: 1, channels: [{ channel: 1, count: members.length }], channelSize: CHANNEL_SIZE },
 ): PlazaView => ({
+  ...seat,
   now,
   bonks,
   weather,
@@ -574,7 +602,7 @@ export const pickGenerator = (env: Readonly<Record<string, string | undefined>>)
   return { generate: async () => null, source: 'fallback lines' }
 }
 
-const POST_PATHS: ReadonlySet<string> = new Set(['/v1/poll', '/v1/act', '/v1/bonk', '/v1/visit', '/v1/visit/end', '/v1/room/act', '/v1/room/sticker', '/v1/gift', '/v1/gift/take'])
+const POST_PATHS: ReadonlySet<string> = new Set(['/v1/poll', '/v1/act', '/v1/channel', '/v1/bonk', '/v1/visit', '/v1/visit/end', '/v1/room/act', '/v1/room/sticker', '/v1/gift', '/v1/gift/take'])
 
 const json = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } })
@@ -619,6 +647,11 @@ export const createPlaza = (options: PlazaOptions = {}) => {
   const changed = new Map<string, number>()
   const listeners = new Set<Listener>()
   const maxGuests = options.maxGuests ?? 2
+  const channelSize = options.channelSize ?? CHANNEL_SIZE
+  const seats = new Map<string, number>()
+  const sockets = new Map<Peer, Listener>()
+  const walkedAt = new Map<string, number>()
+  const waitingWalks = new Map<string, ReturnType<typeof setTimeout>>()
   const storage = options.storage
   const saved = parseSaved(storage?.read() ?? null)
   const rooms = new Map<string, Room>(saved.rooms.map(room => [room.owner.id, room]))
@@ -640,13 +673,29 @@ export const createPlaza = (options: PlazaOptions = {}) => {
     return `e${now().toString(36)}${counter.toString(36)}`
   }
 
+  const seatOf = (id: string): number => seats.get(id) ?? 1
+
+  const channelCounts = (): Map<number, number> => new Map([...Map.groupBy(seats.values(), channel => channel)].map(([channel, list]) => [channel, list.length]))
+
+  const channelList = (): ChannelCount[] => {
+    const counts = channelCounts()
+    return [...new Set([1, ...counts.keys()])].sort((a, b) => a - b).map(channel => ({ channel, count: counts.get(channel) ?? 0 }))
+  }
+
+  const seatView = (channel: number): Seat => ({ channel, channels: channelList(), channelSize })
+
+  const isReachableChannel = (channel: unknown): channel is number =>
+    typeof channel === 'number' && Number.isInteger(channel) && channel >= 1 && channel <= Math.min(MAX_CHANNEL, Math.max(0, ...channelCounts().keys()) + 1)
+
+  const channelFor = (listener: Listener): number => (listener.id !== null && seats.has(listener.id) ? seatOf(listener.id) : listener.watch)
+
   const byActivity = (a: Member, b: Member): number => STATUS_RANK[b.status] - STATUS_RANK[a.status] || (changed.get(b.id) ?? 0) - (changed.get(a.id) ?? 0)
 
   const ranked = (): Member[] => [...members.values()].sort(byActivity)
 
   const friendsOf = (id: string, order: readonly Member[] = ranked()): (Omit<Member, 'sprite'> & { isRoomOpen: boolean })[] =>
     order
-      .filter(member => member.id !== id)
+      .filter(member => member.id !== id && seatOf(member.id) === seatOf(id))
       .slice(0, 30)
       .map(member => ({ ...friendOf(member), isRoomOpen: rooms.get(member.id)?.isOpen === true }))
 
@@ -684,7 +733,7 @@ export const createPlaza = (options: PlazaOptions = {}) => {
 
 
   const eventsFor = (id: string, since: number): PlazaEvent[] =>
-    events.filter(event => event.at > since && event.from.id !== id && (event.to === null || event.to === id)).slice(-20)
+    events.filter(event => event.at > since && event.from.id !== id && (event.to === id || (event.to === null && event.channel === seatOf(id)))).slice(-20)
 
   const bonkBoard = (at: number): BonkBoard => {
     if (kstDayOf(at) !== bonkDay) {
@@ -694,25 +743,53 @@ export const createPlaza = (options: PlazaOptions = {}) => {
     return { total: counts.reduce((sum, [, count]) => sum + count, 0), top: counts.slice(0, 5).map(([kind, count]) => ({ kind, label: BONK_KINDS[kind] ?? '', count })) }
   }
 
-  const viewAt = (at: number): PlazaView => plazaView([...members.values()], events, at, bonkBoard(at), roomsView(), weather, spots, chats)
+  const viewAt = (at: number, channel: number): PlazaView =>
+    plazaView(
+      [...members.values()].filter(member => seatOf(member.id) === channel),
+      events.filter(event => event.channel === channel),
+      at,
+      bonkBoard(at),
+      roomsView(),
+      weather,
+      spots,
+      chats.filter(chat => chat.channel === channel),
+      seatView(channel),
+    )
+
+  const viewMessage = (listener: Listener, view: PlazaView): string => (listener.isSocket ? JSON.stringify({ t: 'view', view }) : sseMessage('view', view))
 
   const messageFor = (listener: Listener, at: number, order?: readonly Member[]): string =>
-    listener.id === null
-      ? sseMessage('view', viewAt(at))
-      : sseMessage('plaza', { now: at, friends: friendsOf(listener.id, order), events: eventsFor(listener.id, 0), bonks: bonkBoard(at), weather, ...homeOf(listener.id) })
+    listener.isSocket || listener.id === null
+      ? viewMessage(listener, viewAt(at, channelFor(listener)))
+      : sseMessage('plaza', { now: at, friends: friendsOf(listener.id, order), events: eventsFor(listener.id, 0), bonks: bonkBoard(at), weather, ...homeOf(listener.id), ...seatView(seatOf(listener.id)) })
 
   const flush = (): void => {
     clearTimeout(flushTimer)
     flushTimer = undefined
     const at = now()
     const order = ranked()
-    let view: string | undefined
+    const views = new Map<number, PlazaView>()
+    const texts = new Map<string, string>()
     for (const listener of listeners) {
-      if (listener.id === null) {
-        view ??= messageFor(listener, at)
-        listener.send(view)
+      if (listener.isSocket || listener.id === null) {
+        const channel = channelFor(listener)
+        const key = `${channel}:${listener.isSocket}`
+        const view = views.get(channel) ?? viewAt(at, channel)
+        const text = texts.get(key) ?? viewMessage(listener, view)
+        views.set(channel, view)
+        texts.set(key, text)
+        listener.send(text)
       } else {
         listener.send(messageFor(listener, at, order))
+      }
+    }
+  }
+
+  const relay = (channel: number, message: unknown): void => {
+    const text = JSON.stringify(message)
+    for (const listener of sockets.values()) {
+      if (channelFor(listener) === channel) {
+        listener.send(text)
       }
     }
   }
@@ -730,7 +807,7 @@ export const createPlaza = (options: PlazaOptions = {}) => {
   }
 
   const record = (event: PlazaEvent): void => {
-    events = [...events, event].slice(-maxEvents)
+    events = [...events, { ...event, channel: event.channel ?? seatOf(event.from.id) }].slice(-maxEvents)
     broadcast()
   }
 
@@ -743,7 +820,12 @@ export const createPlaza = (options: PlazaOptions = {}) => {
         actions.delete(id)
         actions.delete(`bonk:${id}`)
         actions.delete(`say:${id}`)
+        actions.delete(`move:${id}`)
+        walkedAt.delete(id)
+        clearTimeout(waitingWalks.get(id))
+        waitingWalks.delete(id)
         changed.delete(id)
+        seats.delete(id)
       }
     }
     if (members.size !== before) {
@@ -796,6 +878,9 @@ export const createPlaza = (options: PlazaOptions = {}) => {
 
   const join = (me: Member): void => {
     const before = members.get(me.id)
+    if (!seats.has(me.id)) {
+      seats.set(me.id, pickChannel(channelCounts(), channelSize))
+    }
     if (!spots.has(me.id)) {
       const taken = [...members.keys()].map(id => spots.get(id)).filter((spot): spot is Spot => spot !== undefined)
       spots.set(me.id, pickSpot(me.id, taken))
@@ -827,7 +912,7 @@ export const createPlaza = (options: PlazaOptions = {}) => {
     }
   }
 
-  const stream = (id: string | null, tab: string): Response => {
+  const stream = (id: string | null, tab: string, watch: number): Response => {
     const encoder = new TextEncoder()
     let listener: Listener | null = null
     let timer: ReturnType<typeof setInterval> | undefined
@@ -846,7 +931,7 @@ export const createPlaza = (options: PlazaOptions = {}) => {
             close()
           }
         }
-        const opened: Listener = { id, send }
+        const opened: Listener = { id, watch, isSocket: false, send }
         listener = opened
         listeners.add(opened)
         send(`retry: 3000\n\n${messageFor(opened, now())}`)
@@ -866,8 +951,21 @@ export const createPlaza = (options: PlazaOptions = {}) => {
 
   const isRateLimited = (id: string, at: number): boolean => {
     const recent = (actions.get(id) ?? []).filter(time => at - time < 60_000)
-    actions.set(id, [...recent, at])
-    return recent.length >= actionsPerMinute
+    const isLimited = recent.length >= actionsPerMinute
+    actions.set(id, isLimited ? recent : [...recent, at])
+    return isLimited
+  }
+
+  const settleWalk = (id: string, spot: Spot): void => {
+    waitingWalks.delete(id)
+    if (!members.has(id)) {
+      return
+    }
+    walkedAt.set(id, now())
+    spots.set(id, spot)
+    persist()
+    relay(seatOf(id), { t: 'walk', key: hashOf(id), spot: [spot.u, spot.v] })
+    broadcast()
   }
 
   const place = (id: string, u: unknown, v: unknown): Response => {
@@ -875,9 +973,14 @@ export const createPlaza = (options: PlazaOptions = {}) => {
     if (!isSpot(raw)) {
       return json(400, { error: 'bad request' })
     }
-    spots.set(id, { u: toSpot(raw.u), v: toSpot(raw.v) })
-    persist()
-    broadcast()
+    const spot = { u: toSpot(raw.u), v: toSpot(raw.v) }
+    const wait = WALK_GAP_MS - (now() - (walkedAt.get(id) ?? -Infinity))
+    clearTimeout(waitingWalks.get(id))
+    if (wait > 0) {
+      waitingWalks.set(id, setTimeout(() => settleWalk(id, spot), wait))
+      return json(202, { ok: true, queued: true })
+    }
+    settleWalk(id, spot)
     return json(202, { ok: true })
   }
 
@@ -890,9 +993,26 @@ export const createPlaza = (options: PlazaOptions = {}) => {
     if (isRateLimited(`say:${id}`, at)) {
       return json(429, { error: 'too many lines, take a breath' })
     }
-    chats = [...chats.filter(chat => at - chat.at < CHAT_TTL_MS), { id: nextId(), from: id, at, text }].slice(-MAX_CHATS)
+    const said = { id: nextId(), from: id, at, text, channel: seatOf(id) }
+    chats = [...chats.filter(chat => at - chat.at < CHAT_TTL_MS), said].slice(-MAX_CHATS)
+    relay(said.channel, { t: 'say', chat: { key: hashOf(said.id), from: hashOf(id), at, text } })
     broadcast()
     return json(202, { ok: true })
+  }
+
+  const move = (id: string, channel: unknown): Response => {
+    if (!isReachableChannel(channel)) {
+      return json(400, { error: 'bad request' })
+    }
+    if (isRateLimited(`move:${id}`, now())) {
+      return json(429, { error: 'too many moves, take a breath' })
+    }
+    if (channel !== seatOf(id) && (channelCounts().get(channel) ?? 0) >= channelSize) {
+      return json(409, { error: 'that channel is full' })
+    }
+    seats.set(id, channel)
+    broadcast()
+    return json(200, { ok: true, ...seatView(channel) })
   }
 
   const fallbackLine = (kind: Action): string => {
@@ -903,11 +1023,12 @@ export const createPlaza = (options: PlazaOptions = {}) => {
   const poll = (me: Member, since: number): Response => {
     const at = me.lastSeen
     prune(at)
-    if (!members.has(me.id)) {
+    const isNew = !members.has(me.id)
+    join(me)
+    if (isNew) {
       record({ id: nextId(), at, kind: 'join', from: senderOf(me), to: null, line: '' })
     }
-    join(me)
-    return json(200, { now: at, friends: friendsOf(me.id), events: eventsFor(me.id, since), bonks: bonkBoard(at), weather, ...homeOf(me.id) })
+    return json(200, { now: at, friends: friendsOf(me.id), events: eventsFor(me.id, since), bonks: bonkBoard(at), weather, ...homeOf(me.id), ...seatView(seatOf(me.id)) })
   }
 
   const bonk = (me: Member, kind: string): Response => {
@@ -1026,9 +1147,7 @@ export const createPlaza = (options: PlazaOptions = {}) => {
     return json(200, { ok: true })
   }
 
-  const act = async (me: Member, kind: Action, toId: string | null): Promise<Response> => {
-    const at = me.lastSeen
-    join(me)
+  const cast = (me: Member, kind: Action, toId: string | null, at: number): Response => {
     if (isRateLimited(me.id, at)) {
       return json(429, { error: 'too many actions, take a breath' })
     }
@@ -1036,11 +1155,15 @@ export const createPlaza = (options: PlazaOptions = {}) => {
     if (toId !== null && to === null) {
       return json(404, { error: 'that friend is not in the plaza' })
     }
+    if (to !== null && seatOf(to.id) !== seatOf(me.id)) {
+      return json(404, { error: 'that friend is not in your channel' })
+    }
     const id = nextId()
     const from = senderOf(me)
+    const channel = seatOf(me.id)
     const task = generate(actionPrompt(me, to, kind))
       .catch(() => null)
-      .then(raw => record({ id, at: now(), kind, from, to: to?.id ?? null, line: sanitizeLine(raw) ?? fallbackLine(kind) }))
+      .then(raw => record({ id, at: now(), kind, from, to: to?.id ?? null, line: sanitizeLine(raw) ?? fallbackLine(kind), channel }))
     pending = [...pending, task]
     void task.finally(() => {
       pending = pending.filter(other => other !== task)
@@ -1048,19 +1171,33 @@ export const createPlaza = (options: PlazaOptions = {}) => {
     return json(202, { ok: true, queued: true, id })
   }
 
+  const act = async (me: Member, kind: Action, toId: string | null): Promise<Response> => {
+    join(me)
+    return cast(me, kind, toId, me.lastSeen)
+  }
+
+  const castByKey = (id: string, kind: unknown, key: unknown): Response => {
+    const me = members.get(id)
+    const to = [...members.values()].find(member => member.id !== id && hashOf(member.id) === key)
+    if (me === undefined || !ACTIONS.has(String(kind))) {
+      return json(400, { error: 'bad request' })
+    }
+    return to === undefined ? json(404, { error: 'that friend is not in the plaza' }) : cast(me, kind as Action, to.id, now())
+  }
+
   const handle = async (request: Request): Promise<Response> => {
     const url = new URL(request.url)
     if (request.method === 'GET' && url.pathname === '/') {
       prune(now())
-      return new Response(statusPage(viewAt(now())), { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
+      return new Response(statusPage(viewAt(now(), channelParam(url))), { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
     }
     if (request.method === 'GET' && url.pathname === '/v1/plaza') {
       prune(now())
-      return json(200, viewAt(now()))
+      return json(200, viewAt(now(), channelParam(url)))
     }
     if (request.method === 'GET' && url.pathname === '/v1/plaza/stream') {
       prune(now())
-      return stream(null, '')
+      return stream(null, '', channelParam(url))
     }
     if (request.method === 'GET' && url.pathname === '/v1/stream') {
       const id = url.searchParams.get('id') ?? ''
@@ -1069,7 +1206,7 @@ export const createPlaza = (options: PlazaOptions = {}) => {
         return json(400, { error: 'bad request' })
       }
       prune(now())
-      return stream(id, /^[a-z0-9]{1,16}$/i.test(tab) ? tab : '')
+      return stream(id, /^[a-z0-9]{1,16}$/i.test(tab) ? tab : '', 1)
     }
     if (request.method === 'GET' && url.pathname === '/health') {
       return json(200, { ok: true, members: members.size, weather: weather?.level ?? null })
@@ -1098,6 +1235,11 @@ export const createPlaza = (options: PlazaOptions = {}) => {
       return json(400, { error: 'bad request' })
     }
     keepRoom(me, asRecord(body.me))
+    if (url.pathname === '/v1/channel') {
+      prune(now())
+      join(me)
+      return move(me.id, body.channel)
+    }
     if (url.pathname === '/v1/visit') {
       return typeof body.to === 'string' ? visit(me, body.to) : json(400, { error: 'bad request' })
     }
@@ -1130,6 +1272,88 @@ export const createPlaza = (options: PlazaOptions = {}) => {
     return act(me, kind as Action, typeof body.to === 'string' ? body.to : null)
   }
 
+  const upgrade = (request: Request, server: Upgrader): boolean => {
+    const url = new URL(request.url)
+    if (request.method !== 'GET' || url.pathname !== '/v1/ws') {
+      return false
+    }
+    const id = url.searchParams.get('id')
+    return server.upgrade(request, { data: { id: id !== null && /^[a-z0-9-]{4,64}$/i.test(id) ? id : null, watch: channelParam(url) } })
+  }
+
+  const answer = (listener: Listener, of: string, response: Response): void => {
+    if (!response.ok) {
+      listener.send(JSON.stringify({ t: 'error', of, status: response.status }))
+    }
+  }
+
+  const rewatch = (peer: Peer, listener: Listener, watch: number): Listener => {
+    const next = { ...listener, watch }
+    listeners.delete(listener)
+    listeners.add(next)
+    sockets.set(peer, next)
+    return next
+  }
+
+  const hear = (peer: Peer, raw: string | Uint8Array): void => {
+    const listener = sockets.get(peer)
+    const message = typeof raw === 'string' && raw.length <= MAX_BODY ? asRecord(JSON.parse(raw)) : null
+    if (listener === undefined || message === null) {
+      return
+    }
+    prune(now())
+    if (message.t === 'ping') {
+      listener.send(JSON.stringify({ t: 'pong' }))
+      return
+    }
+    const id = listener.id
+    const isPlaying = id !== null && members.has(id)
+    if (message.t === 'move') {
+      const response = isPlaying ? move(id, message.channel) : isReachableChannel(message.channel) ? json(200, { ok: true }) : json(400, { error: 'bad request' })
+      const next = response.ok && !isPlaying ? rewatch(peer, listener, Number(message.channel)) : listener
+      answer(next, 'move', response)
+      next.send(messageFor(next, now()))
+      return
+    }
+    if (message.t !== 'walk' && message.t !== 'say' && message.t !== 'act') {
+      return
+    }
+    if (!isPlaying) {
+      answer(listener, message.t, json(404, { error: 'that pet is not in the plaza' }))
+      return
+    }
+    if (message.t === 'act') {
+      answer(listener, 'act', castByKey(id, message.kind, message.to))
+      return
+    }
+    answer(listener, message.t, message.t === 'walk' ? place(id, message.u, message.v) : speak(id, message.text))
+  }
+
+  const websocket = {
+    idleTimeout: 120,
+    open: (peer: Peer): void => {
+      const listener: Listener = { id: peer.data.id, watch: peer.data.watch, isSocket: true, send: text => void peer.send(text) }
+      sockets.set(peer, listener)
+      listeners.add(listener)
+      prune(now())
+      listener.send(messageFor(listener, now()))
+    },
+    message: (peer: Peer, raw: string | Uint8Array): void => {
+      try {
+        hear(peer, raw)
+      } catch {
+        return
+      }
+    },
+    close: (peer: Peer): void => {
+      const listener = sockets.get(peer)
+      if (listener !== undefined) {
+        listeners.delete(listener)
+      }
+      sockets.delete(peer)
+    },
+  }
+
   const settle = async (): Promise<void> => {
     await Promise.all(pending)
     if (flushTimer !== undefined) {
@@ -1137,14 +1361,20 @@ export const createPlaza = (options: PlazaOptions = {}) => {
     }
   }
 
-  return { handle, members, rooms, visits, events: () => events, settle, setWeather }
+  return { handle, upgrade, websocket, members, rooms, visits, events: () => events, settle, setWeather }
 }
 
 if (import.meta.main) {
   const env = process.env
   const { generate, source } = pickGenerator(env)
   const plaza = createPlaza({ generate, storage: fileStorage(env.TOKO_DATA_FILE ?? `${import.meta.dir}/data/plaza.json`) })
-  const server = Bun.serve({ port: Number(env.PORT ?? 8080), hostname: env.HOST ?? '0.0.0.0', idleTimeout: 120, fetch: plaza.handle })
+  const server = Bun.serve({
+    port: Number(env.PORT ?? 8080),
+    hostname: env.HOST ?? '0.0.0.0',
+    idleTimeout: 120,
+    fetch: (request, bun) => (plaza.upgrade(request, bun) ? undefined : plaza.handle(request)),
+    websocket: plaza.websocket,
+  })
   const tunerKey = (env.TOKO_TUNER_KEY ?? '').trim()
   if (tunerKey.length > 0) {
     watchWeather(tunerKey, plaza.setWeather)
